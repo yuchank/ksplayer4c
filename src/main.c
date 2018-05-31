@@ -33,6 +33,10 @@ typedef struct Decoder {        // 188
   SDL_Thread *decoder_tid;
 } Decoder;
 
+typedef enum {
+  SHOW_MODE_NONE = -1, SHOW_MODE_VIDEO = 0, SHOW_MODE_WAVES, SHOW_MODE_RDFT, SHOW_MODE_NB
+} ShowMode;
+
 typedef struct VideoState {
   SDL_Thread *read_tid;   // 204
   AVInputFormat *iformat; // 205
@@ -52,11 +56,9 @@ typedef struct VideoState {
   unsigned int audio_buf_size;    /* in bytes */    // 246
   int audio_buf_index;            /* in bytes */    // 248
 
-  struct AudioParams audio_tgt;
+  struct AudioParams audio_tgt;   // 256
 
-  enum ShowMode {         // 261
-    SHOW_MODE_NONE = -1, SHOW_MODE_VIDEO = 0, SHOW_MODE_WAVES, SHOW_MODE_RDFT, SHOW_MODE_NB
-  } show_mode;
+  ShowMode show_mode;     // 261
 
   AVStream *video_st;     // 284
   PacketQueue videoq;     // 285
@@ -401,6 +403,10 @@ int main(int argc, char *argv[])  // 3645
   VideoState *is;
 
   input_filename = "little.mkv";
+
+  int x = SHOW_MODE_VIDEO;
+
+  av_log(NULL, AV_LOG_INFO, "%d\n", SHOW_MODE_VIDEO);
 
   // 1. open stream
   is = stream_open(input_filename, file_iformat);
