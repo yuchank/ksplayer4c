@@ -10,7 +10,7 @@ include_directories(${CMAKE_SOURCE_DIR}/include ${SDL2_INCLUDE_DIR})
 link_directories(${CMAKE_SOURCE_DIR}/lib)
 
 set(CMAKE_C_STANDARD 99)
-set(SOURCE_FILES src/main.c src/cmdutils.c src/cmdutils.h)
+set(SOURCE_FILES src/main.c src/cmdutils.c)
 
 add_executable(ksplayer4c ${SOURCE_FILES})
 target_link_libraries(ksplayer4c avdevice avformat avutil avcodec swscale swresample ${SDL2_LIBRARY})
