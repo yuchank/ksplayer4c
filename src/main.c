@@ -8,6 +8,8 @@
 
 #include "cmdutils.h"
 
+const char program_name[] = "ksplayer";
+
 typedef struct PacketQueue {    // 118
 
   int serial;
@@ -69,11 +71,17 @@ typedef struct VideoState {
 /* options specified by the user */
 static AVInputFormat *file_iformat;   // 310
 static const char *input_filename;    // 311
+static int default_width  = 640;      // 313
+static int default_height = 480;      // 314
 static int video_disable;             // 318
-static display_disable;               // 322
+static int display_disable;           // 322
+static int borderless;                // 323
 static int show_status = 1;           // 325
 
 static AVPacket flush_pkt;            // 358
+
+static SDL_Window *window;            // 362
+static SDL_Renderer *renderer;        // 363
 
 static SDL_AudioDeviceID audio_dev;   // 365
 
@@ -145,6 +153,16 @@ static void video_audio_display(VideoState *is)   // 1043
 static void stream_close(VideoState *is)          // 1242
 {
 
+}
+
+static void do_exit(VideoState *is)               // 1279
+{
+  if (is) {
+    stream_close(is);
+  }
+
+  SDL_Quit();
+  exit(0);
 }
 
 /* display the current picture, if any */
@@ -365,11 +383,13 @@ static VideoState *stream_open(const char *filename, AVInputFormat *iformat)  //
   if (!is->filename)
     goto fail;
 
+  /* start video display */
+
   // 2. create a thread
   is->read_tid = SDL_CreateThread(read_thread, "read_thread", is);
   if (!is->read_tid) {
     av_log(NULL, AV_LOG_FATAL, "SDL_CreateThread(): %s\n", SDL_GetError());
-    fail:
+fail:
     stream_close(is);
     return NULL;
   }
@@ -395,24 +415,60 @@ static void event_loop(VideoState *cur_stream)  // 3244
   for (;;) {
     // 9. video refresh
     refresh_loop_wait_event(cur_stream, &event);
+    switch (event.type) {
+      case SDL_QUIT:
+        do_exit(cur_stream);
+        break;
+      default:
+        break;
+    }
   }
 }
 
 int main(int argc, char *argv[])  // 3645
 {
+  int flags;
   VideoState *is;
 
-  input_filename = "little.mkv";
+  input_filename = "alien.mkv";
 
-  int x = SHOW_MODE_VIDEO;
+  if (display_disable) {
+    video_disable = 1;
+  }
+  flags = SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER;
+  if (SDL_Init(flags)) {
+    av_log(NULL, AV_LOG_FATAL, "Could not initialize SDL - %s\n", SDL_GetError());
+    av_log(NULL, AV_LOG_FATAL, "(Did you set the DISPLAY variable?)\n");
+    exit(1);
+  }
 
-  av_log(NULL, AV_LOG_INFO, "%d\n", SHOW_MODE_VIDEO);
+  if (!display_disable) {
+    int flags = SDL_WINDOW_HIDDEN;
+    if (borderless)
+      flags |= SDL_WINDOW_BORDERLESS;
+    else
+      flags |= SDL_WINDOW_RESIZABLE;
+    window = SDL_CreateWindow(program_name, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, default_width, default_height, flags);
+    if (window) {
+      renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+      if (!renderer) {
+        av_log(NULL, AV_LOG_WARNING, "Failed to initialize a hardware accelerated renderer: %s\n", SDL_GetError());
+        renderer = SDL_CreateRenderer(window, -1, 0);
+      }
+    }
+  }
 
   // 1. open stream
   is = stream_open(input_filename, file_iformat);
+  if (!is) {
+    av_log(NULL, AV_LOG_FATAL, "Failed to initialize VideoState!\n");
+    do_exit(NULL);
+  }
 
   // 8. event loop
   event_loop(is);
+
+  /* never returns */
 
   return 0;
 }
