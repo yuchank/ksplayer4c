@@ -35,7 +35,7 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub)    
 
     }
     else {
-      if (d->avctx-codec_type == AVMEDIA_TYPE_SUBTITLE) {
+      if (d->avctx->codec_type == AVMEDIA_TYPE_SUBTITLE) {
 
       }
       else {
