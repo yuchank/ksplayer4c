@@ -3,6 +3,7 @@
 #include <libswresample/swresample.h>
 #include <libavutil/avstring.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/time.h>
 
 #include <SDL.h>
 
@@ -40,8 +41,13 @@ typedef struct AudioParams {    // 134
 } AudioParams;
 
 typedef struct Clock {          // 143
+  double pts;           /* clock base */
+  double pts_drift;     /* clock base minus time at which we updated the clock */
+  double last_updated;
   double speed;
+  int serial;           /* clock is based on a packet with this serial */
   int paused;
+  int *queue_serial;    /* pointer to the current packet queue serial, used for obsolete clock detection */
 } Clock;
 
 /* Common struct for handling all types of decoded data and allocated render buffers */
@@ -80,20 +86,27 @@ typedef struct Decoder {        // 188
 typedef struct VideoState {
   SDL_Thread *read_tid;   // 204
   AVInputFormat *iformat; // 205
+  int abort_request;      // 206
   int force_refresh;      // 207
   int paused;             // 208
+  int last_paused;        // 209
 
   AVFormatContext *ic;    // 216
 
+  Clock audclk;           // 219
   Clock vidclk;           // 220
+  Clock extclk;           // 221
 
   FrameQueue pictq;       // 223
+  FrameQueue subpq;       // 224
   FrameQueue sampq;       // 225
 
   Decoder auddec;         // 227
   Decoder viddec;         // 228
 
   int audio_stream;       // 231
+
+  int audio_clock_serial; // 236
 
   AVStream *audio_st;     // 241
   PacketQueue audioq;     // 242
@@ -114,6 +127,7 @@ typedef struct VideoState {
 
   AVStream *video_st;     // 284
   PacketQueue videoq;     // 285
+  int eof;                // 289
 
   char *filename;         // 291
   int width, height, xleft, ytop;   // 292
@@ -129,6 +143,7 @@ static int default_width  = 640;      // 313
 static int default_height = 480;      // 314
 static int screen_width = 0;          // 315
 static int screen_height = 0;         // 316
+static int audio_disable;             // 317
 static int video_disable;             // 318
 static int display_disable;           // 322
 static int borderless;                // 323
@@ -444,10 +459,26 @@ static void video_display(VideoState *is)         // 1342   *
   SDL_RenderPresent(renderer);
 }
 
-static void init_clock(Clock *c, int *queue_serial)       // 1388
+static void set_clock_at(Clock *c, double pts, int serial, double time)    // 1368   *
+{
+  c->pts = pts;
+  c->last_updated = time;
+  c->pts_drift = c->pts - time;
+  c->serial = serial;
+}
+
+static void set_clock(Clock *c, double pts, int serial)   // 1376   *
+{
+  double time = av_gettime_relative() / 1000000.0;
+  set_clock_at(c, pts, serial, time);
+}
+
+static void init_clock(Clock *c, int *queue_serial)       // 1388   *
 {
   c->speed = 1.0;
   c->paused = 0;
+  c->queue_serial = queue_serial;
+  set_clock(c, NAN, -1);
 }
 
 /* called to display each frame */
@@ -590,6 +621,8 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
   while (!(audio_dev = SDL_OpenAudioDevice(NULL, 0, &wanted_spec, &spec, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE))) {
 
   }
+
+  return spec.size;
 }
 
 /* open a given stream. return 0 if OK */
@@ -597,6 +630,7 @@ static int stream_component_open(VideoState *is, int stream_index)  // 2543
 {
   AVFormatContext *ic = is->ic;
   AVCodecContext *avctx;
+  AVCodec *codec;
   int sample_rate, nb_channels;
   int64_t channel_layout;
   int ret = 0;
@@ -609,12 +643,20 @@ static int stream_component_open(VideoState *is, int stream_index)  // 2543
   if (ret < 0)
     goto fail;
 
+  codec = avcodec_find_decoder(avctx->codec_id);
+
   switch (avctx->codec_type) {
     case AVMEDIA_TYPE_AUDIO:
       /* prepare audio output */
       // 13. audio open
       if ((ret = audio_open(is, channel_layout, nb_channels, sample_rate, &is->audio_tgt)) < 0)
         goto fail;
+
+      is->audio_stream = stream_index;
+      is->audio_st = ic->streams[stream_index];
+
+      decoder_init(&is->auddec, avctx, &is->audioq, is->continue_read_thread);
+
       // 14. start decoder (thread fn: audio_thread)
       if ((ret = decoder_start(&is->auddec, audio_thread, is)) < 0)
         goto out;
@@ -650,6 +692,13 @@ static int read_thread(void *arg)     // 2725
   int st_index[AVMEDIA_TYPE_NB];
   AVPacket pkt1, *pkt = &pkt1;
   int64_t stream_start_time;
+  SDL_mutex *wait_mutex = SDL_CreateMutex();
+
+  if (!wait_mutex) {
+    av_log(NULL, AV_LOG_FATAL, "SDL_CreateMutex(): %s\n", SDL_GetError());
+    ret = AVERROR(ENOMEM);
+    goto fail;
+  }
 
   memset(st_index, -1, sizeof(st_index));
 
@@ -675,9 +724,16 @@ static int read_thread(void *arg)     // 2725
   if (!video_disable)
     st_index[AVMEDIA_TYPE_VIDEO] = av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO, st_index[AVMEDIA_TYPE_VIDEO], -1, NULL, 0);
 
+  if (!audio_disable)
+    st_index[AVMEDIA_TYPE_AUDIO] = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, st_index[AVMEDIA_TYPE_AUDIO], st_index[AVMEDIA_TYPE_VIDEO], NULL, 0);
+
   is->show_mode = show_mode;
 
-  // 3. open stream component
+  // 3. open the streams
+  if (st_index[AVMEDIA_TYPE_AUDIO] >= 0) {
+    stream_component_open(is, st_index[AVMEDIA_TYPE_AUDIO]);
+  }
+
   ret = -1;
   if (st_index[AVMEDIA_TYPE_VIDEO] >= 0) {
     ret = stream_component_open(is, st_index[AVMEDIA_TYPE_VIDEO]);
@@ -686,10 +742,19 @@ static int read_thread(void *arg)     // 2725
     is->show_mode = ret > 0 ? SHOW_MODE_VIDEO : SHOW_MODE_RDFT;
 
   for (;;) {
+    if (is->abort_request)
+      break;
+    if (is->paused != is->last_paused) {
+
+    }
+
     ret = av_read_frame(ic, pkt);
     if (ret < 0) {
       if (ic->pb && ic->pb->error)
         break;
+    }
+    else {
+      is->eof = 0;
     }
 
     /* check if packet is in play range specified by user. then queue, otherwise discard */
@@ -723,15 +788,32 @@ static VideoState *stream_open(const char *filename, AVInputFormat *iformat)  //
   is->filename = av_strdup(filename);
   if (!is->filename)
     goto fail;
+  is->iformat = iformat;
+  is->ytop    = 0;
+  is->xleft   = 0;
 
   /* start video display */
   if (frame_queue_init(&is->pictq, &is->videoq, VIDEO_PICTURE_QUEUE_SIZE, 1) < 0)
     goto fail;
-
-  if (packet_queue_init(&is->videoq) < 0)
+  if (frame_queue_init(&is->subpq, &is->subtitleq, SUBPICTURE_QUEUE_SIZE, 0) < 0)
+    goto fail;
+  if (frame_queue_init(&is->sampq, &is->audioq, SAMPLE_QUEUE_SIZE, 1) < 0)
     goto fail;
 
+  if (packet_queue_init(&is->videoq) < 0 ||
+      packet_queue_init(&is->audioq) < 0 ||
+      packet_queue_init(&is->subtitleq) < 0)
+    goto fail;
+
+  if (!(is->continue_read_thread = SDL_CreateCond())) {
+    av_log(NULL, AV_LOG_FATAL, "SDL_CreateCond(): %s\n", SDL_GetError());
+    goto fail;
+  }
+
   init_clock(&is->vidclk, &is->videoq.serial);
+  init_clock(&is->audclk, &is->audioq.serial);
+  init_clock(&is->extclk, &is->extclk.serial);
+  is->audio_clock_serial = -1;
 
   // 2. create a thread
   is->read_tid = SDL_CreateThread(read_thread, "read_thread", is);
