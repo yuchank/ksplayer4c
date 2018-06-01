@@ -399,11 +399,12 @@ fail:
 static void refresh_loop_wait_event(VideoState *is, SDL_Event *event)   // 3199
 {
   double remaining_time = 0.0;
-
+  SDL_PumpEvents();
   while (!SDL_PeepEvents(event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT)) {
     if (is->show_mode != SHOW_MODE_NONE && (!is->paused || is->force_refresh))
       // 10. video refresh
       video_refresh(is, &remaining_time);
+    SDL_PumpEvents();
   }
 }
 
