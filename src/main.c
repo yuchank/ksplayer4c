@@ -647,6 +647,10 @@ static int stream_component_open(VideoState *is, int stream_index)  // 2543
 
   switch (avctx->codec_type) {
     case AVMEDIA_TYPE_AUDIO:
+      sample_rate     = avctx->sample_rate;
+      nb_channels     = avctx->channels;
+      channel_layout  = avctx->channel_layout;
+
       /* prepare audio output */
       // 13. audio open
       if ((ret = audio_open(is, channel_layout, nb_channels, sample_rate, &is->audio_tgt)) < 0)
